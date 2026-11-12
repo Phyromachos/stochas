@@ -88,9 +88,9 @@ endif()
 # Check the readme at `docs/CMake API.md` in the JUCE repo for the full list.
 
 juce_add_plugin(stochas
-    COMPANY_NAME "Surge Synth Team"
-    BUNDLE_ID "org.surge-synth-team.stochas"
-    DESCRIPTION "Stochas Randomization Enabled Step Sequencer"
+    COMPANY_NAME "Phyromachos"
+    BUNDLE_ID "com.phyromachos.stochasscenes"
+    DESCRIPTION "Stochas Scenes - extended Stochas step sequencer (GPL-3.0 fork)"
     ICON_BIG   "${CMAKE_CURRENT_SOURCE_DIR}/image/app_logo_512.png"
     IS_SYNTH ${STOCHAS_IS_SYNTH}
     NEEDS_MIDI_INPUT TRUE
@@ -98,17 +98,15 @@ juce_add_plugin(stochas
     IS_MIDI_EFFECT ${STOCHAS_IS_MIDI_EFFECT}  
     # EDITOR_WANTS_KEYBOARD_FOCUS TRUE/FALSE    # Does the editor need keyboard focus?
     COPY_PLUGIN_AFTER_BUILD ${STOCHAS_COPY_AFTER_BUILD}        # Should the plugin be installed to a default location after building?
-    PLUGIN_MANUFACTURER_CODE AuVi               # allows compatibility with older patches from AV days
-    PLUGIN_CODE Stoc
+    PLUGIN_MANUFACTURER_CODE Phyr               # own ID so this installs beside the original Stochas
+    PLUGIN_CODE Scns
     FORMATS VST3 ${VST2} AU Standalone     # The formats to build. Other valid formats are: AAX Unity VST AU AUv3
     VST3_CATEGORIES ${STOCHAS_CATEGORY}
-    USE_LEGACY_COMPATIBILITY_PLUGIN_CODE TRUE #needed to maintain plugin code compatibility with what we've released
-    VST3_CAN_REPLACE_VST2 TRUE  #hopefully this will allow old projects to load
-    PRODUCT_NAME "Stochas")        # The name of the final executable, which can differ from the target name
+    PRODUCT_NAME "Stochas Scenes")        # The name of the final executable, which can differ from the target name
 
 add_subdirectory(lib/clap-juce-extensions EXCLUDE_FROM_ALL)
 clap_juce_extensions_plugin(TARGET stochas
-        CLAP_ID "org.surge-synth-team.stochas"
+        CLAP_ID "com.phyromachos.stochasscenes"
         CLAP_FEATURES "note-effect" "sequencer" "stochastic")
 
 add_dependencies( stochas git-info )
