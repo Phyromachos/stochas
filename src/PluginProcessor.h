@@ -13,6 +13,8 @@
 
 #include "SequenceData.h"
 #include "StochaEngine.h"
+#include "SceneTimeline.h"
+#include <atomic>
 class EditorState;
 class SeqAudioProcessor;
 
@@ -155,7 +157,7 @@ struct MidiRecordEvent {
 
 /**
 */
-class SeqAudioProcessor  : public AudioProcessor, public SeqProcessorNotifierHelper, public AutParamNotify
+class SeqAudioProcessor  : public AudioProcessor, public SeqProcessorNotifierHelper, public AutParamNotify, private juce::Timer
 {
    friend class SeqPlaybackParameter;
 
@@ -262,9 +264,31 @@ public:
    // The plugin holds several complete setups ("scenes"). Only the active
    // one lives in mData; the others are kept as XML snapshots.
    // These must only be called from the UI/message thread (never the audio thread).
-   int getCurrentScene() const { return mCurrentScene; }
+   int getCurrentScene() const { return mCurrentScene.load(); }
    bool sceneHasData(int idx);
    void selectScene(int idx);
+
+   // ===== Song (extended fork) =====
+   // An ordered list of blocks (scene, repeats, steps per pass) that the plugin plays
+   // through automatically, following the host's play position.
+   // Everything here is for the UI/message thread only.
+   bool songIsEnabled() const { return mSongEnabled.load(); }
+   void songSetEnabled(bool on);
+   int songGetBlockCount() const { return mSong.getCount(); }
+   SceneBlock songGetBlock(int idx) const;
+   bool songAddBlock(int scene, int repeats, int steps);
+   bool songSetBlock(int idx, int scene, int repeats, int steps);
+   bool songRemoveBlock(int idx);
+   bool songMoveBlock(int from, int to);
+   void songClear();
+   SceneEndMode songGetEndMode() const { return mSong.getEndMode(); }
+   void songSetEndMode(SceneEndMode m);
+   // block currently playing, or -1 (set by the audio thread)
+   int songGetPlayingBlock() const { return mSongUiBlock.load(); }
+   // a scene's own loop length in steps (what "auto" means for a block)
+   int songGetSceneLoopSteps(int scene) const { return mSong.getSceneTiming(scene).loopSteps; }
+   // goes up every time the song changes, so the UI knows when to redraw its list
+   unsigned songGetVersion() const { return mSongVersion.load(); }
 
    // for the ui thread to send in arbitrary data integers
    SeqFifo mIncomingData;
@@ -316,8 +340,33 @@ private:
    // scene storage (see selectScene). Never touched by the audio thread.
    juce::CriticalSection mSceneLock;
    std::unique_ptr<juce::XmlElement> mScenes[SEQ_MAX_SCENES];
-   int mCurrentScene = 0;
+   std::atomic<int> mCurrentScene { 0 };
    void restoreSceneBank(const juce::XmlElement *root);
+
+   // ---- song ----
+   // mSong is only ever WRITTEN by the message thread, and only while holding mSongLock.
+   // The audio thread only reads it, using a try-lock so it can never wait.
+   juce::SpinLock mSongLock;
+   SceneTimeline mSong;
+   std::atomic<bool> mSongEnabled { false };
+   std::atomic<int> mSongUiBlock { -1 };          // written by audio thread, read by UI
+   std::atomic<unsigned> mSongVersion { 0 };
+   std::atomic<int> mSongRequestedScene { -1 };   // audio thread asks, message thread acts
+   // audio-thread-only follow state
+   int mSongLastBlock = -1, mSongLastRep = -1, mSongLastScene = -1;
+   bool mSongLastFull = false;                    // was the last pass a whole loop of its scene?
+   double mSongLastPassEnd = -1e300;              // host beat where the last pass ended
+   int mSongPendingScene = -1;                    // scene we are waiting to see loaded
+   int mSongHoldSamples = 0;
+   int mSongTimingTick = 0;                       // message thread only
+
+   bool updateSong(double ppq, double beatsPerBar, int blockSamples, double sampleRate, bool &hold);
+   void resetSongFollow();
+   void seedEnginesForScene();
+   void restoreSong(const juce::XmlElement *root);
+   SceneTiming timingOf(SequenceData *sd);
+   void refreshActiveSceneTiming();
+   void timerCallback() override;
 };
 
 #endif  // PLUGINPROCESSOR_H_INCLUDED

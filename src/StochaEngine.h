@@ -129,6 +129,11 @@ class StochaEngine {
    // might be some later position
    double mPlayStartPosition;
 
+   // (extended fork, used by song playback) If set, no step at or after this host beat position
+   // is scheduled. The default means no limit, which is the original behaviour.
+   static constexpr double kNoPassEnd = 1e300;
+   double mPassEndBeat;
+
    // add a midi note to the queue (note on and off). Len is in number of samples
    // returns false if it could not be added (not enough space)
    // if velo is 0 then only a note-off will be added (numSamples is ignored in this case)
@@ -218,6 +223,17 @@ public:
    playbackStopped is called
    */
    void setPlaybackStartPosition(double pos);
+
+   /*
+   (extended fork, used by song playback) Begin a new pass: step 0 sits at host beat startBeat,
+   and no step is scheduled at or after endBeat (so the previous scene or pass can never play
+   a step that belongs to the next one). Notes already sounding are left alone.
+   Pass kNoPassEnd as endBeat for no limit.
+   */
+   void restartPass(double startBeat, double endBeat);
+   // change only the limit (see above)
+   void setPassEndBeat(double endBeat) { mPassEndBeat = endBeat; }
+   static double noPassEnd() { return kNoPassEnd; }
 
    /*
    call to process audio block. please set ALL members of mPosInfo before

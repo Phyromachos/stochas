@@ -128,6 +128,7 @@ target_sources(stochas PRIVATE
     src/Persist.cpp
     src/PlayPanel.cpp
     src/ScenePanel.cpp
+    src/SongPanel.cpp
     src/PluginEditor.cpp
     src/PluginProcessor.cpp
     src/Scale.cpp

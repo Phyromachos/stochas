@@ -81,10 +81,14 @@ SeqAudioProcessor::SeqAudioProcessor()  :
    // note that this is accessed from the UI thread as well!!
    // avoid non-atomic operations
    mEditorState = new EditorState();
+
+   // watches for scene-change requests from the audio thread (song playback)
+   startTimer(8);
 }
 
 SeqAudioProcessor::~SeqAudioProcessor()
 {
+   stopTimer();
 
    resetMiniMidiMap();
 
@@ -926,6 +930,21 @@ void SeqAudioProcessor::processBlock(AudioSampleBuffer& buffer, MidiBuffer& midi
          beatsperbar, samplerate, posinfo.bpm, posinfo.ppqPosition, samplesperblock);
    }
 
+   // ===== Song playback (extended fork) =====
+   // When the song is on, the host position decides which scene plays. Outside the song
+   // (before it, or after it when it is set to stop) we stay silent.
+   bool songHold = false;
+   if (mSongEnabled.load()) {
+      if (areWePlaying) {
+         if (!updateSong(posinfo.ppqPosition, beatsperbar, samplesperblock, samplerate, songHold))
+            areWePlaying = false;
+      } else {
+         resetSongFollow();
+      }
+   } else if (mSongLastBlock != -1 || mSongPendingScene != -1) {
+      resetSongFollow();
+   }
+
    // determine whether we are transitioning from playing to not playing
    // or vice versa
    if (!areWePlaying) { // if we are stopped playback
@@ -1038,10 +1057,13 @@ void SeqAudioProcessor::processBlock(AudioSampleBuffer& buffer, MidiBuffer& midi
 
          // if we are just starting playback and we are in manual playback mode
          // (ie play starts at 0 position wherever the user hit play btn)
-         if (startingPlayback && mMPBstate==MPBstarted) {
+         if (startingPlayback && mMPBstate==MPBstarted && !mSongEnabled.load()) {
             mStocha[i].setPlaybackStartPosition(mMPBStartPosition);
          }
          // todo get retval and blink some overflow light if false
+         // (while a song scene change is still loading we hold off, so that the new
+         //  section never starts by playing a note from the previous scene)
+         if (!songHold)
          mStocha[i].processBlock(posinfo.ppqPosition, //which quarter measure we are on
             samplerate,
             samplesperblock,
@@ -1153,7 +1175,7 @@ SeqAudioProcessor::getStateInformation (MemoryBlock& block)
    {
       const juce::ScopedLock sl(mSceneLock);
       auto *bank = new XmlElement("scenebank");
-      bank->setAttribute("cur", mCurrentScene);
+      bank->setAttribute("cur", mCurrentScene.load());
       for (int i = 0; i < SEQ_MAX_SCENES; i++) {
          if (i != mCurrentScene && mScenes[i]) {
             auto *sc = new XmlElement("scene");
@@ -1163,6 +1185,20 @@ SeqAudioProcessor::getStateInformation (MemoryBlock& block)
          }
       }
       root.addChildElement(bank);
+   }
+   {
+      const juce::SpinLock::ScopedLockType sl(mSongLock);
+      auto *song = new XmlElement("song");
+      song->setAttribute("on", mSongEnabled.load() ? 1 : 0);
+      song->setAttribute("end", (int)mSong.getEndMode());
+      for (int i = 0; i < mSong.getCount(); i++) {
+         auto *b = new XmlElement("b");
+         b->setAttribute("scene", mSong.getBlock(i).scene);
+         b->setAttribute("rep", mSong.getBlock(i).repeats);
+         b->setAttribute("steps", mSong.getBlock(i).steps);
+         song->addChildElement(b);
+      }
+      root.addChildElement(song);
    }
    copyXmlToBinary(root, block);
 
@@ -1198,6 +1234,7 @@ void SeqAudioProcessor::setStateInformation (const void* in , int size)
       {
          mData.swap();
          restoreSceneBank(xml.get());
+         restoreSong(xml.get());
       }
    }
 
@@ -1532,11 +1569,19 @@ void SeqAudioProcessor::restoreSceneBank(const juce::XmlElement *root)
    for (auto &s : mScenes)
       s.reset();
    mCurrentScene = 0;
+   {
+      // forget the step timing of whatever was loaded before
+      const juce::SpinLock::ScopedLockType slt(mSongLock);
+      for (int i = 0; i < SEQ_MAX_SCENES; i++)
+         mSong.setSceneTiming(i, SceneTiming());
+   }
 
    // projects saved by the original Stochas have no scene bank: everything is scene 1
    const XmlElement *bank = root->getChildByName("scenebank");
-   if (bank == nullptr)
+   if (bank == nullptr) {
+      refreshActiveSceneTiming();
       return;
+   }
 
    int cur = bank->getIntAttribute("cur", 0);
    if (cur >= 0 && cur < SEQ_MAX_SCENES)
@@ -1548,6 +1593,46 @@ void SeqAudioProcessor::restoreSceneBank(const juce::XmlElement *root)
          continue;
       if (const XmlElement *c = sc->getFirstChildElement())
          mScenes[idx].reset(new XmlElement(*c));
+   }
+
+   // work out each stored scene's step timing for the song (the data itself stays as XML)
+   std::unique_ptr<SequenceData> scratch(new SequenceData());   // too big for the stack
+   for (int i = 0; i < SEQ_MAX_SCENES; i++) {
+      if (mScenes[i]) {
+         SeqPersist persist;
+         if (persist.retrieve(scratch.get(), mScenes[i].get())) {
+            const juce::SpinLock::ScopedLockType sl2(mSongLock);
+            mSong.setSceneTiming(i, timingOf(scratch.get()));
+         }
+      }
+   }
+   refreshActiveSceneTiming();
+   mSongVersion.fetch_add(1);
+}
+
+// how a scene counts its steps, taken from its data
+SceneTiming SeqAudioProcessor::timingOf(SequenceData *sd)
+{
+   LayerTimingIn in[SEQ_MAX_LAYERS];
+   for (int i = 0; i < SEQ_MAX_LAYERS; i++) {
+      SequenceLayer *l = sd->getLayer(i);
+      in[i].numSteps = l->getNumSteps();
+      in[i].stepsPerMeasure = l->getStepsPerMeasure();
+      in[i].clockDiv = l->getClockDivider();
+   }
+   return pickSceneTiming(in, SEQ_MAX_LAYERS, SEQ_CLOCK_DENOM);
+}
+
+// keep the song's idea of the active scene's length up to date (message thread)
+void SeqAudioProcessor::refreshActiveSceneTiming()
+{
+   const int cur = mCurrentScene.load();
+   const SceneTiming t = timingOf(mData.getAudSeqData());
+   const SceneTiming old = mSong.getSceneTiming(cur);
+   if (t.loopSteps != old.loopSteps || t.stepsPerBar != old.stepsPerBar) {
+      const juce::SpinLock::ScopedLockType sl(mSongLock);
+      mSong.setSceneTiming(cur, t);
+      mSongVersion.fetch_add(1);
    }
 }
 
@@ -1591,7 +1676,8 @@ void SeqAudioProcessor::selectScene(int idx)
    mData.swap();
    mData.resetUndo();
    mScenes[idx].reset();   // the active scene lives in mData now
-   mCurrentScene = idx;
+   mCurrentScene = idx;    // (the audio thread watches this to know the new scene has arrived)
+   refreshActiveSceneTiming();
 
    // 4. same housekeeping that loading a saved state does
    for (int i = 0; i < SEQ_MAX_LAYERS; i++)
@@ -1599,4 +1685,227 @@ void SeqAudioProcessor::selectScene(int idx)
    rebuildMiniMidiMap();
    changeStandaloneTempo();
    mNotifier.uiNeedsUpdate();
+}
+
+
+/*============================================
+Song (extended fork)
+*============================================*/
+
+// Runs on the audio thread once per block while the song is on and the host is playing.
+// Returns false if the song says nothing should play right now.
+bool SeqAudioProcessor::updateSong(double ppq, double beatsPerBar, int blockSamples, double sampleRate, bool &hold)
+{
+   hold = false;
+   const juce::SpinLock::ScopedTryLockType sl(mSongLock);
+   if (!sl.isLocked())               // the user is editing the song this instant; carry on as before
+      return mSongLastBlock >= 0;
+
+   const ScenePosition p = mSong.query(ppq, beatsPerBar);
+   if (!p.active) {
+      mSongLastBlock = mSongLastRep = mSongLastScene = -1;
+      mSongPendingScene = -1;
+      mSongUiBlock.store(-1);
+      return false;
+   }
+   mSongUiBlock.store(p.blockIndex);
+
+   const SceneTiming tm = mSong.getSceneTiming(p.scene);
+   const bool full = (p.passSteps == tm.loopSteps);          // this pass is the scene's whole loop
+   const double passStart = ppq - p.beatsIntoPass;           // host beat where step 0 of this pass sits
+   const double passEnd = passStart + p.passBeats;
+   const bool pastEnd = p.beatsIntoPass >= p.passBeats;      // (hold-last mode keeps playing after the end)
+
+   // what follows this pass? If it is simply the same whole loop again, or the held last block,
+   // the engine's own looping already does exactly the right thing and we leave it alone.
+   bool seamlessNext = pastEnd;
+   ScenePosition nxt;
+   if (!pastEnd) {
+      nxt = mSong.query(p.passStartBeat + p.passBeats + 1e-6, beatsPerBar);
+      if (nxt.active) {
+         if (nxt.blockIndex == p.blockIndex && nxt.repeatIndex == p.repeatIndex)
+            seamlessNext = true;
+         else if (nxt.scene == p.scene && full && nxt.passSteps == mSong.getSceneTiming(nxt.scene).loopSteps)
+            seamlessNext = true;
+      }
+   }
+
+   // has a new pass begun (or did the host jump somewhere else)?
+   const bool changed = (p.blockIndex != mSongLastBlock || p.repeatIndex != mSongLastRep || p.scene != mSongLastScene);
+   if (changed) {
+      const bool sceneNew = (p.scene != mSongLastScene);
+      const bool sequential = (mSongLastBlock >= 0) && std::fabs(passStart - mSongLastPassEnd) < 1e-3;
+      const bool seamless = !sceneNew && sequential && full && mSongLastFull;
+      mSongLastBlock = p.blockIndex;
+      mSongLastRep = p.repeatIndex;
+      mSongLastScene = p.scene;
+
+      if (!seamless) {
+         if (sceneNew) {
+            // let go of anything still sounding from the old scene, and forget its position
+            // and MIDI-control overrides
+            for (int i = 0; i < SEQ_MAX_LAYERS; i++)
+               mStocha[i].playbackStopped();
+            if (p.scene != mCurrentScene.load()) {
+               // the new scene has not been loaded yet (it normally is, see below). Ask for it
+               // and stay quiet until it arrives.
+               mSongPendingScene = p.scene;
+               mSongHoldSamples = 0;
+               mSongRequestedScene.store(p.scene);
+            } else {
+               seedEnginesForScene();
+            }
+         }
+         // step 0 of the new pass is here; nothing after the pass's end belongs to it
+         for (int i = 0; i < SEQ_MAX_LAYERS; i++)
+            mStocha[i].restartPass(passStart, seamlessNext ? StochaEngine::noPassEnd() : passEnd);
+      }
+   }
+   mSongLastFull = full;
+   mSongLastPassEnd = passEnd;
+
+   // keep the limit right for the pass that is playing
+   for (int i = 0; i < SEQ_MAX_LAYERS; i++)
+      mStocha[i].setPassEndBeat(seamlessNext ? StochaEngine::noPassEnd() : passEnd);
+
+   // About to change scene? Ask for the next one a step early, so that it is already loaded
+   // when the new pass starts. (Everything the old scene still needs to play is already
+   // scheduled by then, and the limit above stops it scheduling anything more.)
+   if (!seamlessNext && nxt.active && nxt.scene != mCurrentScene.load()) {
+      const double oneStep = beatsPerBar / tm.stepsPerBar;
+      if (passEnd - ppq < oneStep)
+         mSongRequestedScene.store(nxt.scene);
+   }
+
+   // waiting for a scene to finish loading? Stay quiet until it has, but never for long
+   if (mSongPendingScene >= 0) {
+      if (mCurrentScene.load() == mSongPendingScene) {
+         mSongPendingScene = -1;
+         seedEnginesForScene();   // the scene is in: use its own random seed, as it would on its own
+      } else {
+         mSongHoldSamples += blockSamples;
+         if (mSongHoldSamples > (int)(sampleRate * 0.75))
+            mSongPendingScene = -1;        // gave up waiting; carry on with what we have
+         else
+            hold = true;
+      }
+   }
+   return true;
+}
+
+void SeqAudioProcessor::resetSongFollow()
+{
+   mSongLastBlock = mSongLastRep = mSongLastScene = -1;
+   mSongLastFull = false;
+   mSongLastPassEnd = -1e300;
+   mSongPendingScene = -1;
+   mSongHoldSamples = 0;
+   mSongUiBlock.store(-1);
+   for (int i = 0; i < SEQ_MAX_LAYERS; i++)
+      mStocha[i].setPassEndBeat(StochaEngine::noPassEnd());
+}
+
+// message thread: acts on scene requests from the audio thread, and keeps scene lengths current
+void SeqAudioProcessor::timerCallback()
+{
+   const int r = mSongRequestedScene.exchange(-1);
+   if (r >= 0 && r < SEQ_MAX_SCENES && mSongEnabled.load())
+      selectScene(r);
+
+   if (++mSongTimingTick >= 16) {      // roughly every 130 ms
+      mSongTimingTick = 0;
+      refreshActiveSceneTiming();
+   }
+}
+
+void SeqAudioProcessor::restoreSong(const juce::XmlElement *root)
+{
+   const juce::SpinLock::ScopedLockType sl(mSongLock);
+   mSong.clear();
+   mSong.setEndMode(SceneEndMode::Stop);
+   mSongEnabled.store(false);
+   // projects saved by the original Stochas have no song
+   if (const XmlElement *song = root->getChildByName("song")) {
+      mSongEnabled.store(song->getIntAttribute("on", 0) != 0);
+      const int e = song->getIntAttribute("end", 0);
+      mSong.setEndMode(e == 1 ? SceneEndMode::Loop : e == 2 ? SceneEndMode::HoldLast : SceneEndMode::Stop);
+      for (auto *b : song->getChildWithTagNameIterator("b"))
+         mSong.addBlock(b->getIntAttribute("scene", 0), b->getIntAttribute("rep", 1), b->getIntAttribute("steps", 0));
+   }
+   mSongVersion.fetch_add(1);
+}
+
+void SeqAudioProcessor::songSetEnabled(bool on)
+{
+   mSongEnabled.store(on);
+   mSongVersion.fetch_add(1);
+}
+
+SceneBlock SeqAudioProcessor::songGetBlock(int idx) const
+{
+   if (idx < 0 || idx >= mSong.getCount())
+      return SceneBlock();
+   return mSong.getBlock(idx);
+}
+
+bool SeqAudioProcessor::songAddBlock(int scene, int repeats, int steps)
+{
+   const juce::SpinLock::ScopedLockType sl(mSongLock);
+   const bool ok = mSong.addBlock(scene, repeats, steps);
+   mSongVersion.fetch_add(1);
+   return ok;
+}
+
+bool SeqAudioProcessor::songSetBlock(int idx, int scene, int repeats, int steps)
+{
+   const juce::SpinLock::ScopedLockType sl(mSongLock);
+   const bool ok = mSong.setBlock(idx, scene, repeats, steps);
+   mSongVersion.fetch_add(1);
+   return ok;
+}
+
+bool SeqAudioProcessor::songRemoveBlock(int idx)
+{
+   const juce::SpinLock::ScopedLockType sl(mSongLock);
+   const bool ok = mSong.removeBlock(idx);
+   mSongVersion.fetch_add(1);
+   return ok;
+}
+
+bool SeqAudioProcessor::songMoveBlock(int from, int to)
+{
+   const juce::SpinLock::ScopedLockType sl(mSongLock);
+   const bool ok = mSong.moveBlock(from, to);
+   mSongVersion.fetch_add(1);
+   return ok;
+}
+
+void SeqAudioProcessor::songClear()
+{
+   const juce::SpinLock::ScopedLockType sl(mSongLock);
+   mSong.clear();
+   mSongVersion.fetch_add(1);
+}
+
+void SeqAudioProcessor::songSetEndMode(SceneEndMode m)
+{
+   const juce::SpinLock::ScopedLockType sl(mSongLock);
+   mSong.setEndMode(m);
+   mSongVersion.fetch_add(1);
+}
+
+// A scene that has just been switched in gets the same treatment as when playback starts:
+// its saved random seed (or a fresh one if it has none) is given to the engines.
+void SeqAudioProcessor::seedEnginesForScene()
+{
+   static_assert(SEQ_MAX_LAYERS == 4, "need one sequence id per layer");
+   static const uint64 seqid[SEQ_MAX_LAYERS] = { 999999587, 2000037797, 300045709, 40044757 };
+   SequenceData *seq = mData.getAudSeqData();
+   int64 seed = seq->getRandomSeed();
+   if (seed == 0) {
+      seed = generateNewRootSeed();
+      mNotifier.setRandomSeed(seed);
+   }
+   for (int i = 0; i < SEQ_MAX_LAYERS; i++)
+      mStocha[i].setRandomSeed((uint64)seed, seqid[i]);
 }

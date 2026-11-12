@@ -333,6 +333,20 @@ SeqAudioProcessorEditor::SeqAudioProcessorEditor(SeqAudioProcessor &p)
    mScenePanel.reset(new ScenePanel(mProcessor));
    addAndMakeVisible(*mScenePanel);
 
+   // ============================== Song editor (extended fork), hidden until the Song button is clicked
+   mSongPanel.reset(new SongPanel(mProcessor));
+   addChildComponent(*mSongPanel);
+   mSongPanel->onClose = [this] { mSongPanel->setVisible(false); };
+   mScenePanel->onSongButton = [this] {
+      if (mSongPanel->isVisible()) {
+         mSongPanel->setVisible(false);
+      } else {
+         mSongPanel->refresh();
+         mSongPanel->setVisible(true);
+         mSongPanel->toFront(false);
+      }
+   };
+
    setSize(SEQ_SIZE_MAIN_W, SEQ_SIZE_MAIN_H + SEQ_SIZE_SCENE_H);
 
    fixButtonColors();
@@ -377,6 +391,10 @@ void SeqAudioProcessorEditor::resized()
    // taller by the same amount, so everything below keeps its original size.
    if (mScenePanel)
       mScenePanel->setBounds(me.removeFromTop(SEQ_SIZE_SCENE_H));
+
+   // the song editor covers everything below the scene strip
+   if (mSongPanel)
+      mSongPanel->setBounds(getLocalBounds().withTrimmedTop(SEQ_SIZE_MAIN_BORDER + SEQ_SIZE_SCENE_H));
 
    // Area above the main grid (help btn, layer select)
    upper = me.removeFromTop(20);
@@ -1522,6 +1540,8 @@ void SeqAudioProcessorEditor::mainTimer()
    // scene buttons (extended fork)
    if (mScenePanel)
       mScenePanel->refresh();
+   if (mSongPanel && mSongPanel->isVisible())
+      mSongPanel->refresh();
 
    // current pattern that's playing
    mPatPlayPanel.check();

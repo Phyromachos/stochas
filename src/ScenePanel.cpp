@@ -12,6 +12,11 @@ ScenePanel::ScenePanel(SeqAudioProcessor &proc) : mProc(proc)
    mLabel.setColour(Label::textColourId, Colours::grey);
    addAndMakeVisible(mLabel);
 
+   mSongBtn.setButtonText("Song");
+   mSongBtn.setWantsKeyboardFocus(false);
+   mSongBtn.addListener(this);
+   addAndMakeVisible(mSongBtn);
+
    for (int i = 0; i < SEQ_MAX_SCENES; i++) {
       mShownHas[i] = false;
       mBtn[i].setButtonText(String(i + 1));
@@ -25,6 +30,8 @@ ScenePanel::ScenePanel(SeqAudioProcessor &proc) : mProc(proc)
 void ScenePanel::resized()
 {
    Rectangle<int> r = getLocalBounds();
+   mSongBtn.setBounds(r.removeFromRight(80).reduced(0, 3));
+   r.removeFromRight(6);
    mLabel.setBounds(r.removeFromLeft(46));
 
    const int perRow = SEQ_MAX_SCENES / 2;
@@ -64,6 +71,11 @@ void ScenePanel::applyColours(int idx, bool isCurrent, bool hasData)
 
 void ScenePanel::refresh()
 {
+   const int songOn = mProc.songIsEnabled() ? 1 : 0;
+   if (songOn != mShownSong) {
+      mShownSong = songOn;
+      mSongBtn.setButtonText(songOn ? "SONG ON" : "Song");
+   }
    const int cur = mProc.getCurrentScene();
    for (int i = 0; i < SEQ_MAX_SCENES; i++) {
       const bool has = mProc.sceneHasData(i);
@@ -80,6 +92,11 @@ void ScenePanel::refresh()
 
 void ScenePanel::buttonClicked(Button *b)
 {
+   if (b == &mSongBtn) {
+      if (onSongButton)
+         onSongButton();
+      return;
+   }
    for (int i = 0; i < SEQ_MAX_SCENES; i++) {
       if (b == &mBtn[i]) {
          mProc.selectScene(i);

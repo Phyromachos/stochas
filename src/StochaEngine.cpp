@@ -105,7 +105,8 @@ StochaEngine::StochaEngine() :
    mOldSeed(0),
    mOldSeq(0),
    mOldStepPosInTrack(0.0),
-   mPlayStartPosition(0.0)
+   mPlayStartPosition(0.0),
+   mPassEndBeat(kNoPassEnd)
 
 {
    memset(mMapping, 0, sizeof(mMapping));
@@ -1121,7 +1122,13 @@ bool StochaEngine::processBlock(double beatPosition,    // which quarter measure
 
    // last position that would occur in the current block
    double last_step_pos_in_block = steppos_in_track + (numSamplesInBlock *steps_per_sample);
-   while (next_half_step_pos < last_step_pos_in_block) {
+
+   // (extended fork) steps at or after the end of the current song pass belong to the next pass
+   const double pass_end_step = (mPassEndBeat < kNoPassEnd)
+      ? ((mPassEndBeat - mPlayStartPosition) / bpb) * steps_per_measure * clock_div
+      : kNoPassEnd;
+
+   while (next_half_step_pos < last_step_pos_in_block && (double)next_step_position < pass_end_step - 0.5) {
       // yes, it would occur in this block
       // 4. if so, determine how many samples are occurring between now and the next _step_ position
       int samples_until = (int)(((double)next_step_position - steppos_in_track)*spss);
@@ -1156,6 +1163,7 @@ void StochaEngine::playbackStopped()
    mCurrentStepPosition = INVALIDPOS;
    mRealStepPosition = INVALIDREALPOS;
    mPlayStartPosition = 0.0;
+   mPassEndBeat = kNoPassEnd;
    // reset our midi controller values that may have been set from incoming midi
    // or from vst automation
    resetMidiControl();
@@ -1171,6 +1179,14 @@ void StochaEngine::playbackStopped()
 void StochaEngine::setPlaybackStartPosition(double pos)
 {
    mPlayStartPosition = pos;
+}
+
+void StochaEngine::restartPass(double startBeat, double endBeat)
+{
+   mPlayStartPosition = startBeat;
+   mPassEndBeat = endBeat;
+   // forget which step we were on so that step 0 of the new pass is the next one played
+   mCurrentStepPosition = INVALIDPOS;
 }
 
 bool
