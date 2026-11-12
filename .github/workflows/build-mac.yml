@@ -1,0 +1,50 @@
+# Manual macOS build for a personal fork. No Apple certificates needed.
+# Run it from the "Actions" tab: Build Mac plugin -> Run workflow.
+name: Build Mac plugin
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Get the code (including JUCE)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools
+        run: brew install ninja
+
+      - name: Build VST3 and Standalone
+        run: |
+          cmake -Bbuild -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DSTOCHAS_VERSION="$(cat VERSION)" \
+            -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+          cmake --build build --target stochas_VST3 --config Release --parallel
+          cmake --build build --target stochas_Standalone --config Release --parallel
+
+      - name: Build Audio Unit
+        run: |
+          cmake -Bbuild_au -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DSTOCHAS_IS_SYNTH=FALSE \
+            -DSTOCHAS_VERSION="$(cat VERSION)" \
+            -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+          cmake --build build_au --target stochas_AU --config Release --parallel
+
+      - name: Collect and sign locally (ad-hoc)
+        run: |
+          mkdir -p out
+          cp -R build/stochas_artefacts/Release/VST3/*        out/
+          cp -R build/stochas_artefacts/Release/Standalone/*  out/
+          cp -R build_au/stochas_artefacts/Release/AU/*       out/
+          for b in out/*; do codesign --force --deep -s - "$b"; done
+          ls -l out
+          ditto -c -k --keepParent out Stochas-mac.zip
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stochas-mac
+          path: Stochas-mac.zip
