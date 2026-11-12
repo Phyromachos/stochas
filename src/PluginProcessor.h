@@ -258,6 +258,14 @@ public:
    // this stores the actual data in the sequence. UI thread needs to access it
    SeqDataBuffer mData;
 
+   // ===== Scenes (extended fork) =====
+   // The plugin holds several complete setups ("scenes"). Only the active
+   // one lives in mData; the others are kept as XML snapshots.
+   // These must only be called from the UI/message thread (never the audio thread).
+   int getCurrentScene() const { return mCurrentScene; }
+   bool sceneHasData(int idx);
+   void selectScene(int idx);
+
    // for the ui thread to send in arbitrary data integers
    SeqFifo mIncomingData;
 
@@ -304,6 +312,12 @@ public:
    virtual String getTextForAutomationParameterValue(int paramId, int paramValue) override;
    virtual int parseTextForAutomationParameterValue(int paramId, String text) override;
 
+private:
+   // scene storage (see selectScene). Never touched by the audio thread.
+   juce::CriticalSection mSceneLock;
+   std::unique_ptr<juce::XmlElement> mScenes[SEQ_MAX_SCENES];
+   int mCurrentScene = 0;
+   void restoreSceneBank(const juce::XmlElement *root);
 };
 
 #endif  // PLUGINPROCESSOR_H_INCLUDED

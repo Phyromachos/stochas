@@ -1146,7 +1146,25 @@ SeqAudioProcessor::getStateInformation (MemoryBlock& block)
    SeqPersist persist;
    const XmlElement &xml=persist.store(mData.getAudSeqData());
    //xml.writeToFile(juce::File("C:\\crap\\test.xml"), "");
-   copyXmlToBinary(xml, block);
+
+   // Extended fork: the active scene is written exactly as the original did (so the
+   // original format is untouched) and the other scenes are added in a <scenebank> section.
+   XmlElement root(xml);
+   {
+      const juce::ScopedLock sl(mSceneLock);
+      auto *bank = new XmlElement("scenebank");
+      bank->setAttribute("cur", mCurrentScene);
+      for (int i = 0; i < SEQ_MAX_SCENES; i++) {
+         if (i != mCurrentScene && mScenes[i]) {
+            auto *sc = new XmlElement("scene");
+            sc->setAttribute("idx", i);
+            sc->addChildElement(new XmlElement(*mScenes[i]));
+            bank->addChildElement(sc);
+         }
+      }
+      root.addChildElement(bank);
+   }
+   copyXmlToBinary(root, block);
 
 /* This is the code that just saves it as a block of memory
    int seqsize = sizeof(SequenceData);
@@ -1177,7 +1195,10 @@ void SeqAudioProcessor::setStateInformation (const void* in , int size)
       // TODO - we are using the UI side since we are setting data. 
       // we need to put a lock here or something
       if (persist.retrieve(mData.getUISeqData(), xml.get()))
+      {
          mData.swap();
+         restoreSceneBank(xml.get());
+      }
    }
 
    // tempo in saved state might differ, we need to recalculate some stuff here
@@ -1499,3 +1520,83 @@ float SeqPlaybackParameter::getValueForText(const String & text) const
       return 0.0f;
 }
 
+
+
+/*============================================
+Scenes (extended fork)
+*============================================*/
+
+void SeqAudioProcessor::restoreSceneBank(const juce::XmlElement *root)
+{
+   const juce::ScopedLock sl(mSceneLock);
+   for (auto &s : mScenes)
+      s.reset();
+   mCurrentScene = 0;
+
+   // projects saved by the original Stochas have no scene bank: everything is scene 1
+   const XmlElement *bank = root->getChildByName("scenebank");
+   if (bank == nullptr)
+      return;
+
+   int cur = bank->getIntAttribute("cur", 0);
+   if (cur >= 0 && cur < SEQ_MAX_SCENES)
+      mCurrentScene = cur;
+
+   for (auto *sc : bank->getChildWithTagNameIterator("scene")) {
+      int idx = sc->getIntAttribute("idx", -1);
+      if (idx < 0 || idx >= SEQ_MAX_SCENES || idx == mCurrentScene)
+         continue;
+      if (const XmlElement *c = sc->getFirstChildElement())
+         mScenes[idx].reset(new XmlElement(*c));
+   }
+}
+
+bool SeqAudioProcessor::sceneHasData(int idx)
+{
+   if (idx < 0 || idx >= SEQ_MAX_SCENES)
+      return false;
+   const juce::ScopedLock sl(mSceneLock);
+   return idx == mCurrentScene || mScenes[idx] != nullptr;
+}
+
+void SeqAudioProcessor::selectScene(int idx)
+{
+   if (idx < 0 || idx >= SEQ_MAX_SCENES)
+      return;
+   const juce::ScopedLock sl(mSceneLock);
+   if (idx == mCurrentScene)
+      return;
+
+   // 1. remember the scene we are leaving
+   {
+      SeqPersist persist;
+      const XmlElement &xml = persist.store(mData.getAudSeqData());
+      mScenes[mCurrentScene].reset(new XmlElement(xml));
+   }
+
+   // 2. load the scene we are entering (or start it blank, like a new Stochas)
+   bool loaded = false;
+   if (mScenes[idx]) {
+      SeqPersist persist;
+      loaded = persist.retrieve(mData.getUISeqData(), mScenes[idx].get());
+   }
+   if (!loaded) {
+      std::unique_ptr<SequenceData> blank(new SequenceData()); // too big for the stack
+      *mData.getUISeqData() = *blank;
+      if (wrapperType == wrapperType_Standalone)
+         mData.getUISeqData()->setAutoPlayMode(SEQ_PLAYMODE_INSTANT);
+   }
+
+   // 3. hand it to the audio thread (same mechanism that loading a patch uses)
+   mData.swap();
+   mData.resetUndo();
+   mScenes[idx].reset();   // the active scene lives in mData now
+   mCurrentScene = idx;
+
+   // 4. same housekeeping that loading a saved state does
+   for (int i = 0; i < SEQ_MAX_LAYERS; i++)
+      mStocha[i].resetMappingSchema();
+   rebuildMiniMidiMap();
+   changeStandaloneTempo();
+   mNotifier.uiNeedsUpdate();
+}

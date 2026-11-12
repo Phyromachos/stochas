@@ -102,6 +102,10 @@ in mono mode are 0..high val where 0 is off, and the following applies
 #define SEQ_MAX_PATTERNS      8
 // max layers
 #define SEQ_MAX_LAYERS        4
+// scenes (extended fork): number of complete Stochas setups the plugin can hold
+#define SEQ_MAX_SCENES        32
+// height of the scene button strip added at the top of the editor
+#define SEQ_SIZE_SCENE_H      46
 
 // max number of source cells for a column of targets (each column shares the array)
 #define SEQ_MAX_CHAIN_SOURCES 48

@@ -26,6 +26,7 @@
 #include "SettingsTab.h"
 #include "MidiDialog.h"
 #include "FileDialog.h"
+#include "ScenePanel.h"
 
 /*
 Main UI Class
@@ -105,6 +106,7 @@ class SeqAudioProcessorEditor  : public AudioProcessorEditor,
    
 
    SeqHelpBanner mHelpBanner;
+   std::unique_ptr<ScenePanel> mScenePanel; // scene buttons (extended fork)
    ToggleCptWithLabel mLayerToggle;
    Label mLayerLabel;
    ButtonCpt mUISizePanic;          // zorder should be higher than layer label (does this do it?)

@@ -593,6 +593,10 @@ public:
 
    void setChangeNotify(ChangeCallback cb, void *cbhandle);
 
+   // make undo a no-op by pointing it at the current data. Used after switching
+   // scenes so that Undo can never pull in another scene's data. UI thread only.
+   void resetUndo() { mUndoBuffer = mBuffer[mCurrent.get()]; }
+
    // called from audio thread to get the data it needs.
    // The audio thread must never alter the data
    // also, the audio thread should not assume that subsequent calls to getAudSeqData

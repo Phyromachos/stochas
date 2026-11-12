@@ -329,7 +329,11 @@ SeqAudioProcessorEditor::SeqAudioProcessorEditor(SeqAudioProcessor &p)
    // set main size. Note that this is done almost last, because it causes a paint to happen.
    // We don't want to paint on the items above until the above already happened, otherwise they
    // don't get another paint apparently
-   setSize(SEQ_SIZE_MAIN_W, SEQ_SIZE_MAIN_H);
+   // ============================== Scene buttons (extended fork)
+   mScenePanel.reset(new ScenePanel(mProcessor));
+   addAndMakeVisible(*mScenePanel);
+
+   setSize(SEQ_SIZE_MAIN_W, SEQ_SIZE_MAIN_H + SEQ_SIZE_SCENE_H);
 
    fixButtonColors();
 
@@ -368,6 +372,11 @@ void SeqAudioProcessorEditor::resized()
 
    // allow for a full border around the whole thing
    me.reduce(SEQ_SIZE_MAIN_BORDER, SEQ_SIZE_MAIN_BORDER);
+
+   // scene button strip along the very top (extended fork). The window was made
+   // taller by the same amount, so everything below keeps its original size.
+   if (mScenePanel)
+      mScenePanel->setBounds(me.removeFromTop(SEQ_SIZE_SCENE_H));
 
    // Area above the main grid (help btn, layer select)
    upper = me.removeFromTop(20);
@@ -1509,6 +1518,10 @@ void SeqAudioProcessorEditor::mainTimer()
 
    // tell the play panel to see whether one of the play lights needs to be lit
    mPlayPanel.check();
+
+   // scene buttons (extended fork)
+   if (mScenePanel)
+      mScenePanel->refresh();
 
    // current pattern that's playing
    mPatPlayPanel.check();
